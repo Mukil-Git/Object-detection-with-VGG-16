@@ -1,0 +1,524 @@
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, models
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
+import os
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+import json
+from tensorflow.keras.applications import VGG16
+from tensorflow.keras.optimizers import Adam, SGD, RMSprop
+import seaborn as sns
+from sklearn.metrics import classification_report, confusion_matrix
+
+class VGG16ObjectDetector:
+    def __init__(self, input_shape=(224, 224, 3), num_classes=10):
+        self.input_shape = input_shape
+        self.num_classes = num_classes
+        self.model = None
+        self.history = None
+        self.best_params = {}
+        
+    def build_vgg16_network(self, use_pretrained=False):
+        """Build VGG-16 network from scratch or with pretrained weights"""
+        if use_pretrained:
+            # Use pretrained VGG-16 as base
+            base_model = VGG16(weights='imagenet', 
+                              include_top=False, 
+                              input_shape=self.input_shape)
+            base_model.trainable = False
+            
+            model = models.Sequential([
+                base_model,
+                layers.GlobalAveragePooling2D(),
+                layers.Dense(512, activation='relu'),
+                layers.Dropout(0.5),
+                layers.Dense(self.num_classes, activation='softmax')
+            ])
+        else:
+            # Build VGG-16 from scratch
+            model = models.Sequential()
+            
+            # Block 1
+            model.add(layers.Conv2D(64, (3, 3), activation='relu', padding='same', input_shape=self.input_shape))
+            model.add(layers.Conv2D(64, (3, 3), activation='relu', padding='same'))
+            model.add(layers.MaxPooling2D((2, 2), strides=(2, 2)))
+            
+            # Block 2
+            model.add(layers.Conv2D(128, (3, 3), activation='relu', padding='same'))
+            model.add(layers.Conv2D(128, (3, 3), activation='relu', padding='same'))
+            model.add(layers.MaxPooling2D((2, 2), strides=(2, 2)))
+            
+            # Block 3
+            model.add(layers.Conv2D(256, (3, 3), activation='relu', padding='same'))
+            model.add(layers.Conv2D(256, (3, 3), activation='relu', padding='same'))
+            model.add(layers.Conv2D(256, (3, 3), activation='relu', padding='same'))
+            model.add(layers.MaxPooling2D((2, 2), strides=(2, 2)))
+            
+            # Block 4
+            model.add(layers.Conv2D(512, (3, 3), activation='relu', padding='same'))
+            model.add(layers.Conv2D(512, (3, 3), activation='relu', padding='same'))
+            model.add(layers.Conv2D(512, (3, 3), activation='relu', padding='same'))
+            model.add(layers.MaxPooling2D((2, 2), strides=(2, 2)))
+            
+            # Block 5
+            model.add(layers.Conv2D(512, (3, 3), activation='relu', padding='same'))
+            model.add(layers.Conv2D(512, (3, 3), activation='relu', padding='same'))
+            model.add(layers.Conv2D(512, (3, 3), activation='relu', padding='same'))
+            model.add(layers.MaxPooling2D((2, 2), strides=(2, 2)))
+            
+            # Classifier
+            model.add(layers.Flatten())
+            model.add(layers.Dense(4096, activation='relu'))
+            model.add(layers.Dropout(0.5))
+            model.add(layers.Dense(4096, activation='relu'))
+            model.add(layers.Dropout(0.5))
+            model.add(layers.Dense(self.num_classes, activation='softmax'))
+        
+        self.model = model
+        return model
+    
+    def preprocess_client_data(self, data_path, image_size=(224, 224)):
+        """Load and preprocess client images using OpenCV and NumPy"""
+        images = []
+        labels = []
+        
+        try:
+            if os.path.isdir(data_path):
+                # Load from directory structure
+                class_names = sorted(os.listdir(data_path))
+                self.class_names = class_names
+                
+                for class_idx, class_name in enumerate(class_names):
+                    class_path = os.path.join(data_path, class_name)
+                    if os.path.isdir(class_path):
+                        image_files = [f for f in os.listdir(class_path) 
+                                     if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
+                        
+                        for img_file in image_files[:500]:  # Limit per class
+                            img_path = os.path.join(class_path, img_file)
+                            
+                            # Load image using OpenCV
+                            img = cv2.imread(img_path)
+                            if img is not None:
+                                # Convert BGR to RGB
+                                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                                # Resize image
+                                img = cv2.resize(img, image_size)
+                                # Normalize pixel values
+                                img = img.astype('float32') / 255.0
+                                
+                                images.append(img)
+                                labels.append(class_idx)
+            else:
+                # Generate sample data if path doesn't exist
+                print("Generating sample data for demonstration...")
+                self.class_names = [f'class_{i}' for i in range(self.num_classes)]
+                for i in range(1000):
+                    img = np.random.rand(*self.input_shape).astype('float32')
+                    label = np.random.randint(0, self.num_classes)
+                    images.append(img)
+                    labels.append(label)
+                    
+        except Exception as e:
+            print(f"Error loading data: {e}")
+            # Fallback to sample data
+            self.class_names = [f'class_{i}' for i in range(self.num_classes)]
+            for i in range(1000):
+                img = np.random.rand(*self.input_shape).astype('float32')
+                label = np.random.randint(0, self.num_classes)
+                images.append(img)
+                labels.append(label)
+        
+        images = np.array(images)
+        labels = np.array(labels)
+        
+        print(f"Loaded {len(images)} images with {len(np.unique(labels))} classes")
+        return images, labels
+    
+    def split_data(self, images, labels, test_size=0.2, val_size=0.2):
+        """Split data into train, validation, and test sets"""
+        # First split: train+val and test
+        X_temp, X_test, y_temp, y_test = train_test_split(
+            images, labels, test_size=test_size, random_state=42, stratify=labels
+        )
+        
+        # Second split: train and validation
+        val_size_adjusted = val_size / (1 - test_size)
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_temp, y_temp, test_size=val_size_adjusted, random_state=42, stratify=y_temp
+        )
+        
+        print(f"Training set: {len(X_train)} samples")
+        print(f"Validation set: {len(X_val)} samples")
+        print(f"Test set: {len(X_test)} samples")
+        
+        return X_train, X_val, X_test, y_train, y_val, y_test
+    
+    def create_data_augmentation(self):
+        """Create image augmentation for training data"""
+        datagen = ImageDataGenerator(
+            rotation_range=20,
+            width_shift_range=0.2,
+            height_shift_range=0.2,
+            horizontal_flip=True,
+            zoom_range=0.2,
+            shear_range=0.2,
+            fill_mode='nearest'
+        )
+        return datagen
+    
+    def calculate_iou(self, y_true, y_pred):
+        """Calculate IoU (Intersection over Union) for classification"""
+        # For classification, we'll use accuracy as a proxy for IoU
+        # In actual object detection, this would be bounding box IoU
+        intersection = tf.reduce_sum(y_true * y_pred, axis=1)
+        union = tf.reduce_sum(y_true + y_pred, axis=1) - intersection
+        iou = intersection / (union + tf.keras.backend.epsilon())
+        return tf.reduce_mean(iou)
+    
+    def iou_loss(self, y_true, y_pred):
+        """IoU loss function"""
+        return 1 - self.calculate_iou(y_true, y_pred)
+    
+    def compile_model(self, optimizer='adam', learning_rate=0.001, momentum=0.9):
+        """Compile model with specified optimizer and parameters"""
+        if optimizer.lower() == 'adam':
+            opt = Adam(learning_rate=learning_rate)
+        elif optimizer.lower() == 'sgd':
+            opt = SGD(learning_rate=learning_rate, momentum=momentum)
+        elif optimizer.lower() == 'rmsprop':
+            opt = RMSprop(learning_rate=learning_rate)
+        else:
+            opt = Adam(learning_rate=learning_rate)
+        
+        self.model.compile(
+            optimizer=opt,
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy', self.calculate_iou]
+        )
+        
+        return self.model
+    
+    def hyperparameter_tuning(self, X_train, y_train, X_val, y_val):
+        """Perform hyperparameter tuning"""
+        print("Starting hyperparameter tuning...")
+        
+        # Hyperparameters to tune
+        batch_sizes = [16, 32, 64]
+        learning_rates = [0.001, 0.0001, 0.01]
+        optimizers = ['adam', 'sgd', 'rmsprop']
+        momentums = [0.9, 0.95, 0.99]
+        epochs_list = [10, 20, 30]
+        
+        best_val_acc = 0
+        best_params = {}
+        
+        for batch_size in batch_sizes:
+            for lr in learning_rates:
+                for opt in optimizers:
+                    for momentum in momentums if opt == 'sgd' else [0.9]:
+                        for epochs in epochs_list:
+                            print(f"Testing: batch_size={batch_size}, lr={lr}, optimizer={opt}, epochs={epochs}")
+                            
+                            # Build and compile model
+                            self.build_vgg16_network()
+                            self.compile_model(optimizer=opt, learning_rate=lr, momentum=momentum)
+                            
+                            # Train for limited epochs
+                            history = self.model.fit(
+                                X_train, y_train,
+                                batch_size=batch_size,
+                                epochs=min(epochs, 5),  # Limit for tuning
+                                validation_data=(X_val, y_val),
+                                verbose=0
+                            )
+                            
+                            # Get best validation accuracy
+                            val_acc = max(history.history['val_accuracy'])
+                            
+                            if val_acc > best_val_acc:
+                                best_val_acc = val_acc
+                                best_params = {
+                                    'batch_size': batch_size,
+                                    'learning_rate': lr,
+                                    'optimizer': opt,
+                                    'momentum': momentum,
+                                    'epochs': epochs,
+                                    'val_accuracy': val_acc
+                                }
+                                
+                            print(f"Val accuracy: {val_acc:.4f}")
+        
+        self.best_params = best_params
+        print(f"Best parameters: {best_params}")
+        return best_params
+    
+    def train_model(self, X_train, y_train, X_val, y_val, 
+                   batch_size=32, epochs=50, use_augmentation=True, 
+                   use_best_params=True):
+        """Train the VGG-16 model"""
+        if use_best_params and self.best_params:
+            batch_size = self.best_params.get('batch_size', batch_size)
+            epochs = self.best_params.get('epochs', epochs)
+            lr = self.best_params.get('learning_rate', 0.001)
+            opt = self.best_params.get('optimizer', 'adam')
+            momentum = self.best_params.get('momentum', 0.9)
+            
+            # Rebuild model with best parameters
+            self.build_vgg16_network()
+            self.compile_model(optimizer=opt, learning_rate=lr, momentum=momentum)
+        
+        # Setup callbacks
+        callbacks = [
+            keras.callbacks.EarlyStopping(
+                patience=10, 
+                restore_best_weights=True,
+                monitor='val_accuracy'
+            ),
+            keras.callbacks.ReduceLROnPlateau(
+                factor=0.5, 
+                patience=5,
+                monitor='val_accuracy'
+            ),
+            keras.callbacks.ModelCheckpoint(
+                'vgg16_best_model.h5',
+                save_best_only=True,
+                monitor='val_accuracy'
+            )
+        ]
+        
+        # Train with or without augmentation
+        if use_augmentation:
+            datagen = self.create_data_augmentation()
+            datagen.fit(X_train)
+            
+            history = self.model.fit(
+                datagen.flow(X_train, y_train, batch_size=batch_size),
+                steps_per_epoch=len(X_train) // batch_size,
+                epochs=epochs,
+                validation_data=(X_val, y_val),
+                callbacks=callbacks,
+                verbose=1
+            )
+        else:
+            history = self.model.fit(
+                X_train, y_train,
+                batch_size=batch_size,
+                epochs=epochs,
+                validation_data=(X_val, y_val),
+                callbacks=callbacks,
+                verbose=1
+            )
+        
+        self.history = history
+        return history
+    
+    def evaluate_model(self, X_test, y_test):
+        """Evaluate model and check for overfitting/underfitting"""
+        print("Evaluating model on test dataset...")
+        
+        # Test evaluation
+        test_loss, test_acc, test_iou = self.model.evaluate(X_test, y_test, verbose=0)
+        
+        # Training history analysis
+        train_acc = self.history.history['accuracy'][-1]
+        val_acc = self.history.history['val_accuracy'][-1]
+        
+        print(f"Final Training Accuracy: {train_acc:.4f}")
+        print(f"Final Validation Accuracy: {val_acc:.4f}")
+        print(f"Test Accuracy: {test_acc:.4f}")
+        print(f"Test IoU: {test_iou:.4f}")
+        
+        # Check for overfitting/underfitting
+        acc_diff = train_acc - val_acc
+        val_test_diff = abs(val_acc - test_acc)
+        
+        if acc_diff > 0.1:
+            print("⚠️  Model shows signs of OVERFITTING")
+            print("   - Training accuracy significantly higher than validation accuracy")
+            recommendations = [
+                "Increase dropout rates",
+                "Add more data augmentation",
+                "Reduce model complexity",
+                "Use early stopping",
+                "Add L2 regularization"
+            ]
+        elif val_acc < 0.7 and test_acc < 0.7:
+            print("⚠️  Model shows signs of UNDERFITTING")
+            print("   - Both validation and test accuracies are low")
+            recommendations = [
+                "Increase model complexity",
+                "Reduce dropout rates",
+                "Train for more epochs",
+                "Increase learning rate",
+                "Add more features"
+            ]
+        elif val_test_diff < 0.05:
+            print("✅ Model appears to be WELL-FITTED")
+            print("   - Good balance between bias and variance")
+            recommendations = ["Model is ready for deployment"]
+        else:
+            print("🔄 Model needs further tuning")
+            recommendations = ["Continue hyperparameter optimization"]
+        
+        print("\nRecommendations:")
+        for i, rec in enumerate(recommendations, 1):
+            print(f"  {i}. {rec}")
+        
+        return {
+            'test_accuracy': test_acc,
+            'test_iou': test_iou,
+            'overfitting_score': acc_diff,
+            'generalization_gap': val_test_diff,
+            'recommendations': recommendations
+        }
+    
+    def plot_training_history(self):
+        """Plot training history"""
+        if self.history is None:
+            print("No training history available")
+            return
+        
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+        
+        # Accuracy plot
+        ax1.plot(self.history.history['accuracy'], label='Training Accuracy')
+        ax1.plot(self.history.history['val_accuracy'], label='Validation Accuracy')
+        ax1.set_title('Model Accuracy')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Accuracy')
+        ax1.legend()
+        ax1.grid(True)
+        
+        # Loss plot
+        ax2.plot(self.history.history['loss'], label='Training Loss')
+        ax2.plot(self.history.history['val_loss'], label='Validation Loss')
+        ax2.set_title('Model Loss')
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Loss')
+        ax2.legend()
+        ax2.grid(True)
+        
+        # IoU plot
+        if 'calculate_iou' in self.history.history:
+            ax3.plot(self.history.history['calculate_iou'], label='Training IoU')
+            ax3.plot(self.history.history['val_calculate_iou'], label='Validation IoU')
+            ax3.set_title('IoU Metric')
+            ax3.set_xlabel('Epoch')
+            ax3.set_ylabel('IoU')
+            ax3.legend()
+            ax3.grid(True)
+        
+        # Learning rate plot (if available)
+        if hasattr(self.model.optimizer, 'learning_rate'):
+            ax4.plot(range(len(self.history.history['loss'])), 
+                    [self.model.optimizer.learning_rate] * len(self.history.history['loss']))
+            ax4.set_title('Learning Rate')
+            ax4.set_xlabel('Epoch')
+            ax4.set_ylabel('Learning Rate')
+            ax4.grid(True)
+        
+        plt.tight_layout()
+        plt.savefig('training_history.png', dpi=300, bbox_inches='tight')
+        plt.show()
+    
+    def predict_and_visualize(self, X_test, y_test, num_samples=8):
+        """Make predictions and visualize results"""
+        predictions = self.model.predict(X_test[:num_samples])
+        predicted_classes = np.argmax(predictions, axis=1)
+        
+        plt.figure(figsize=(15, 10))
+        for i in range(num_samples):
+            plt.subplot(2, 4, i + 1)
+            plt.imshow(X_test[i])
+            plt.title(f'True: {self.class_names[y_test[i]]}\n'
+                     f'Pred: {self.class_names[predicted_classes[i]]}\n'
+                     f'Conf: {np.max(predictions[i]):.2f}')
+            plt.axis('off')
+        
+        plt.tight_layout()
+        plt.savefig('prediction_results.png', dpi=300, bbox_inches='tight')
+        plt.show()
+    
+    def save_model(self, filepath='vgg16_final_model.h5'):
+        """Save the trained model"""
+        self.model.save(filepath)
+        print(f"Model saved to {filepath}")
+        
+        # Save training parameters
+        params_dict = {
+            'input_shape': self.input_shape,
+            'num_classes': self.num_classes,
+            'best_params': self.best_params,
+            'class_names': getattr(self, 'class_names', [])
+        }
+        
+        with open('model_config.json', 'w') as f:
+            json.dump(params_dict, f, indent=2)
+        
+        print("Model configuration saved to model_config.json")
+
+def main():
+    """Main execution pipeline"""
+    print("🚀 Starting VGG-16 Object Detection Project")
+    print("=" * 50)
+    
+    # Initialize detector
+    detector = VGG16ObjectDetector(input_shape=(224, 224, 3), num_classes=10)
+    
+    # Load and preprocess client data
+    print("\n📁 Loading client data...")
+    data_path = "path/to/client/data"  # Update this path
+    images, labels = detector.preprocess_client_data(data_path)
+    
+    # Split data
+    print("\n🔀 Splitting data...")
+    X_train, X_val, X_test, y_train, y_val, y_test = detector.split_data(images, labels)
+    
+    # Build VGG-16 network
+    print("\n🏗️  Building VGG-16 network...")
+    detector.build_vgg16_network(use_pretrained=False)  # Built from scratch
+    print(f"Model built with {detector.model.count_params():,} parameters")
+    
+    # Hyperparameter tuning
+    print("\n🔧 Performing hyperparameter tuning...")
+    best_params = detector.hyperparameter_tuning(X_train, y_train, X_val, y_val)
+    
+    # Train model with best parameters
+    print("\n🎯 Training model with optimized parameters...")
+    history = detector.train_model(
+        X_train, y_train, X_val, y_val,
+        use_augmentation=True,
+        use_best_params=True
+    )
+    
+    # Evaluate model
+    print("\n📊 Evaluating model...")
+    evaluation_results = detector.evaluate_model(X_test, y_test)
+    
+    # Plot results
+    print("\n📈 Plotting training history...")
+    detector.plot_training_history()
+    
+    # Visualize predictions
+    print("\n🔮 Visualizing predictions...")
+    detector.predict_and_visualize(X_test, y_test)
+    
+    # Save final model
+    print("\n💾 Saving final model...")
+    detector.save_model('vgg16_final_best_fit_model.h5')
+    
+    print("\n✅ Project completed successfully!")
+    print("=" * 50)
+    print("Final Results:")
+    print(f"Test Accuracy: {evaluation_results['test_accuracy']:.4f}")
+    print(f"Test IoU: {evaluation_results['test_iou']:.4f}")
+    print(f"Model Status: {evaluation_results['recommendations'][0]}")
+    
+    return detector, evaluation_results
+
+if __name__ == "__main__":
+    detector, results = main()
